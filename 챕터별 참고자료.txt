@@ -1,0 +1,26 @@
+메모리 페이징
+
+-페이지 테이블 구조
+http://blog.naver.com/jevida/140191559473
+
+- 페이징 1
+http://blog.naver.com/PostView.nhn?blogId=jevida&logNo=140191405202&parentCategoryNo=&categoryNo=89&viewDate=&isShowPopularPosts=true&from=search
+
+- 페이징 2
+http://blog.naver.com/jevida/140191477322
+
+
+메모리 스와핑
+
+http://blog.naver.com/jevida/140191090013
+
+
+
+임계영역
+http://blog.naver.com/jevida/140190423930
+
+상호배제
+http://blog.naver.com/jevida/140190564196
+
+데드락
+http://blog.naver.com/jevida/140190955628
