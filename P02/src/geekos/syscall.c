@@ -1,0 +1,372 @@
+/*
+ * System call handlers
+ * Copyright (c) 2003, Jeffrey K. Hollingsworth <hollings@cs.umd.edu>
+ * Copyright (c) 2003,2004 David Hovemeyer <daveho@cs.umd.edu>
+ * $Revision: 1.59 $
+ * 
+ * This is free software.  You are permitted to use,
+ * redistribute, and modify it as specified in the file "COPYING".
+ */
+
+#include <geekos/syscall.h>
+#include <geekos/errno.h>
+#include <geekos/kthread.h>
+#include <geekos/int.h>
+#include <geekos/elf.h>
+#include <geekos/malloc.h>
+#include <geekos/screen.h>
+#include <geekos/keyboard.h>
+#include <geekos/string.h>
+#include <geekos/user.h>
+#include <geekos/timer.h>
+#include <geekos/vfs.h>
+
+/*
+ * Null system call.
+ * Does nothing except immediately return control back
+ * to the interrupted user program.
+ * Params:
+ *  state - processor registers from user mode
+ *
+ * Returns:
+ *   always returns the value 0 (zero)
+ */
+static int Sys_Null(struct Interrupt_State* state)
+{
+    return 0;
+}
+
+/*
+ * Exit system call.
+ * The interrupted user process is terminated.
+ * Params:
+ *   state->ebx - process exit code
+ * Returns:
+ *   Never returns to user mode!
+ */
+static int Sys_Exit(struct Interrupt_State* state)
+{
+
+//    TODO("Exit system call");
+	  int rc = state->ebx;
+	struct Kernel_Thread *pThread = Get_Current();
+
+	// Re-Enable interupts as is the tradition of our land
+	Enable_Interrupts();
+
+	// Sets the ldt to be refreshed
+	pThread->userContext->ldtDescriptor->present = 0;
+
+	// Detaching the user context
+	Detach_User_Context(pThread);  
+
+	Exit(rc);
+}
+
+/*
+ * Print a string to the console.
+ * Params:
+ *   state->ebx - user pointer of string to be printed
+ *   state->ecx - number of characters to print
+ * Returns: 0 if successful, -1 if not
+ */
+static int Sys_PrintString(struct Interrupt_State* state)
+{
+//    TODO("PrintString system call");
+	ulong_t pBuf = state->ebx;
+	int bufLen = state->ecx;
+	int rc = -1;
+
+	char *Buf;
+
+	Buf = (char *)Malloc(bufLen);
+	if(Buf == NULL)
+		return rc;
+	memset(Buf, '\0', bufLen);
+
+	// if the copy from user on the string goes bad
+	// then they may be malicous, so kernel panic
+	rc = Copy_From_User(Buf, pBuf, bufLen);
+	KASSERT(rc);
+	//Buf[state->ecx] = '\0';
+	Put_Buf(Buf, bufLen);
+	Free(Buf);
+
+	// Re-Enable interupts as is the tradition of our land
+	Enable_Interrupts();
+	return 0;
+}
+
+/*
+ * Get a single key press from the console.
+ * Suspends the user process until a key press is available.
+ * Params:
+ *   state - processor registers from user mode
+ * Returns: the key code
+ */
+static int Sys_GetKey(struct Interrupt_State* state)
+{
+//    TODO("GetKey system call");
+	// Re-Enable interupts as is the tradition of our land
+	Enable_Interrupts();
+	int keycode = Wait_For_Key();
+	return keycode;
+}
+
+/*
+ * Set the current text attributes.
+ * Params:
+ *   state->ebx - character attributes to use
+ * Returns: always returns 0
+ */
+static int Sys_SetAttr(struct Interrupt_State* state)
+{
+//    TODO("SetAttr system call");
+	Set_Current_Attr(state->ebx);
+	return 0;
+}
+
+/*
+ * Get the current cursor position.
+ * Params:
+ *   state->ebx - pointer to user int where row value should be stored
+ *   state->ecx - pointer to user int where column value should be stored
+ * Returns: 0 if successful, -1 otherwise
+ */
+static int Sys_GetCursor(struct Interrupt_State* state)
+{
+//    TODO("GetCursor system call");
+	int rc = -1;
+	int r = -1, c = -1;
+ 
+	int r_src = state->ebx;
+	int c_src = state->ecx;
+
+	// copy row/collum for currsor from user space to kernel space
+	Copy_From_User(&r, r_src, sizeof(int));
+	Copy_From_User(&c, c_src, sizeof(int));
+
+	Get_Cursor(&r, &c);
+	if(r < 0 || r>NUMROWS || c < 0 || c>NUMCOLS)
+		rc = -1;
+	else
+		rc = 0;
+
+	Copy_To_User(r_src, &r, sizeof(int));
+	Copy_To_User(c_src, &c, sizeof(int));
+
+	// Re-Enable interupts as is the tradition of our land
+	Enable_Interrupts();
+	return rc;
+}
+
+/*
+ * Set the current cursor position.
+ * Params:
+ *   state->ebx - new row value
+ *   state->ecx - new column value
+ * Returns: 0 if successful, -1 otherwise
+ */
+static int Sys_PutCursor(struct Interrupt_State* state)
+{
+//    TODO("PutCursor system call");
+	int r = state->ebx;
+	int c = state->ecx;
+  
+	int rc = -1;   // return code
+	if( Put_Cursor(r, c) )
+		rc = 0;
+	else
+		rc = -1;
+
+	// Re-Enable interupts as is the tradition of our land
+	Enable_Interrupts();
+	return rc;
+}
+
+/*
+ * Create a new user process.
+ * Params:
+ *   state->ebx - user address of name of executable
+ *   state->ecx - length of executable name
+ *   state->edx - user address of command string
+ *   state->esi - length of command string
+ * Returns: pid of process if successful, error code (< 0) otherwise
+ */
+static int Sys_Spawn(struct Interrupt_State* state)
+{
+//    TODO("Spawn system call");
+	ulong_t exe_name = state->ebx;
+	int exe_name_len = state->ecx;
+	ulong_t cmd_name = state->edx;
+	int cmd_name_len = state->esi;
+
+	int rc = -1;
+	int pid = -1;
+	//  int rc = -1;    // return code
+	char *program;  // process code/data buffer
+	char *command;  // comand string buffer
+	struct Kernel_Thread *pThread;
+
+	// Malloc, initalize space for the process
+	program = (char *)Malloc(exe_name_len + 1);
+	memset(program, '\0', exe_name_len);
+
+	// Copy the process code/data from user space to kernel space
+	rc = Copy_From_User(program, exe_name, exe_name_len);
+	KASSERT(rc);
+	program[exe_name_len] = '\0';
+
+	// Malloc, initalize space for the command string
+	command = (char *)Malloc(cmd_name_len + 1);
+	memset(command, '\0', cmd_name_len);
+
+	// Copy the command string from user space to kernel space
+	rc = Copy_From_User(command, cmd_name, cmd_name_len);
+	KASSERT(rc);
+	command[cmd_name_len] = '\0';
+  
+	#ifdef DEBUG1
+		Print("program: %s\n", program);
+		Print("command: %s\n", command);
+	#endif
+
+	// Re-Enable interupts as is the tradition of our land
+	Enable_Interrupts();
+
+	pid = Spawn(program, command, &pThread);
+
+	#ifdef DEBUG1
+		Print("PID    : %d\n", pid);
+	#endif
+
+	if(pid < 0)
+	return pid;
+
+	//  rc = Join(pThread);   // moved to wait
+	Free(program);
+	Free(command);
+
+	//  if( rc == 0 )
+	return pid;
+	// return rc;
+}
+
+/*
+ * Wait for a process to exit.
+ * Params:
+ *   state->ebx - pid of process to wait for
+ * Returns: the exit code of the process,
+ *   or error code (< 0) on error
+ */
+static int Sys_Wait(struct Interrupt_State* state)
+{
+//    TODO("Wait system call");
+	int rc = -1;
+	int pid = state->ebx;
+	struct Kernel_Thread* pThread;
+  
+	// get current thread
+	pThread = Lookup_Thread(pid);
+
+	Enable_Interrupts();
+	rc = Join(pThread);
+
+	return rc;
+}
+
+/*
+ * Get pid (process id) of current thread.
+ * Params:
+ *   state - processor registers from user mode
+ * Returns: the pid of the current thread
+ */
+static int Sys_GetPID(struct Interrupt_State* state)
+{
+//    TODO("GetPID system call");
+	// get current thread
+	struct Kernel_Thread *pThread = Get_Current();
+  
+	// Re-Enable interupts as is the tradition of our land
+	Enable_Interrupts();
+	return(pThread->pid);
+}
+
+static int Sys_Vfork(void)
+{
+  int rc;          /* return code */
+  struct User_Context *pUserContext, *cUserContext; /* declare userContext */
+  int pid = -1; /* 리턴할 process id*/
+  static int parent = 1; /* 현재 함수를 호출한 프로세스가 부모이면 1, 아니면 0 */
+	struct Kernel_Thread *childT; /* 자식 프로세스 포인터 */
+
+	if( parent == 1 ) // 부모 프로세스가 호출한 경우
+	{
+		pUserContext = Get_Current()->userContext;	// 부모 프로세스의 컨텍스트
+	
+		cUserContext = Malloc( sizeof(struct User_Context) );	// 메모리 할당
+		memset(cUserContext,'\0',sizeof(struct User_Context));//usercontext초기화
+
+		// 부모 컨텍스트를 자식 컨텍스트로 복사
+		cUserContext->ldtDescriptor = pUserContext->ldtDescriptor;
+		cUserContext->ldt[0] = pUserContext->ldt[0];
+		cUserContext->ldt[1] = pUserContext->ldt[1];
+		cUserContext->ldtSelector = pUserContext->ldtSelector;
+		cUserContext->csSelector = 	pUserContext->csSelector;
+		cUserContext->dsSelector =  pUserContext->dsSelector;
+	  cUserContext->memory = pUserContext->memory;
+	  cUserContext->size = pUserContext->size;
+	  cUserContext->entryAddr = pUserContext->entryAddr;
+	  cUserContext->argBlockAddr = pUserContext->argBlockAddr;
+	  cUserContext->stackPointerAddr = pUserContext->stackPointerAddr - 0x1000;
+	  cUserContext->refCount = 0;
+																																																							
+		parent = 0;
+
+		Enable_Interrupts();
+
+		// 복제된 컨텍스트로 자식 프로세스 생성
+		childT = Start_User_Thread( cUserContext, false );
+		pid = childT->pid;
+		
+		Join(childT);	// 생성된 자식 프로세스가 종료될때까지 부모프로세스를 보류함
+	}
+	else	// 자식 프로세스가 호출한 경우
+	{
+		pid = 0;
+
+		parent=1;
+	}
+
+	return pid;
+}
+
+// 자식 프로세스가 종료될 때 Sys_Exit()을 호출하지 않고 바로 Exit()을 호출
+void Sys_Vexit(void)
+{
+	Exit(0);
+}
+
+
+/*
+ * Global table of system call handler functions.
+ */
+const Syscall g_syscallTable[] = {
+    Sys_Null,
+    Sys_Exit,
+    Sys_PrintString,
+    Sys_GetKey,
+    Sys_SetAttr,
+    Sys_GetCursor,
+    Sys_PutCursor,
+    Sys_Spawn,
+    Sys_Wait,
+    Sys_GetPID,
+	Sys_Vfork,
+	Sys_Vexit
+};
+
+/*
+ * Number of system calls implemented.
+ */
+const int g_numSyscalls = sizeof(g_syscallTable) / sizeof(Syscall);

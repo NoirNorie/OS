@@ -1,0 +1,329 @@
+/*
+ * Segmentation-based user mode implementation
+ * Copyright (c) 2001,2003 David H. Hovemeyer <daveho@cs.umd.edu>
+ * $Revision: 1.23 $
+ * 
+ * This is free software.  You are permitted to use,
+ * redistribute, and modify it as specified in the file "COPYING".
+ */
+
+#include <geekos/errno.h>
+#include <geekos/ktypes.h>
+#include <geekos/kassert.h>
+#include <geekos/defs.h>
+#include <geekos/mem.h>
+#include <geekos/string.h>
+#include <geekos/malloc.h>
+#include <geekos/int.h>
+#include <geekos/gdt.h>
+#include <geekos/segment.h>
+#include <geekos/tss.h>
+#include <geekos/kthread.h>
+#include <geekos/argblock.h>
+#include <geekos/user.h>
+
+/* ----------------------------------------------------------------------
+ * Variables
+ * ---------------------------------------------------------------------- */
+
+#define DEFAULT_USER_STACK_SIZE 8192
+
+
+/* ----------------------------------------------------------------------
+ * Private functions
+ * ---------------------------------------------------------------------- */
+
+
+/*
+ * Create a new user context of given size
+ */
+
+/* TODO: Implement
+static struct User_Context* Create_User_Context(ulong_t size)
+*/
+
+
+static bool Validate_User_Memory(struct User_Context* userContext,
+    ulong_t userAddr, ulong_t bufSize)
+{
+    ulong_t avail;
+
+    if (userAddr >= userContext->size)
+        return false;
+
+    avail = userContext->size - userAddr;
+    if (bufSize > avail)
+        return false;
+
+    return true;
+}
+
+/* ----------------------------------------------------------------------
+ * Public functions
+ * ---------------------------------------------------------------------- */
+
+/*
+ * Destroy a User_Context object, including all memory
+ * and other resources allocated within it.
+ */
+void Destroy_User_Context(struct User_Context* userContext)
+{
+    /*
+     * Hints:
+     * - you need to free the memory allocated for the user process
+     * - don't forget to free the segment descriptor allocated
+     *   for the process's LDT
+     */
+//    TODO("Destroy a User_Context");
+
+	KASSERT ( userContext != NULL );
+	KASSERT ( userContext->ldtDescriptor != NULL );
+	KASSERT ( userContext->memory != NULL );
+	
+	Free_Segment_Descriptor ( userContext->ldtDescriptor );
+
+	Free ( userContext->memory );
+	Free ( userContext );
+}
+
+/*
+ * Load a user executable into memory by creating a User_Context
+ * data structure.
+ * Params:
+ * exeFileData - a buffer containing the executable to load
+ * exeFileLength - number of bytes in exeFileData
+ * exeFormat - parsed ELF segment information describing how to
+ *   load the executable's text and data segments, and the
+ *   code entry point address
+ * command - string containing the complete command to be executed:
+ *   this should be used to create the argument block for the
+ *   process
+ * pUserContext - reference to the pointer where the User_Context
+ *   should be stored
+ *
+ * Returns:
+ *   0 if successful, or an error code (< 0) if unsuccessful
+ */
+int Load_User_Program(char *exeFileData, ulong_t exeFileLength,
+    struct Exe_Format *exeFormat, const char *command,
+    struct User_Context **pUserContext)
+{
+    /*
+     * Hints:
+     * - Determine where in memory each executable segment will be placed
+     * - Determine size of argument block and where it memory it will be placed
+     * - Copy each executable segment into memory
+     * - Format argument block in memory
+     * - In the created User_Context object, set code entry point
+     *   address, argument block address, and initial kernel stack pointer
+     *   address
+     */
+//    TODO("Load a user executable into a user memory space using segmentation");
+
+	int rc = 0; // return code
+
+	//Pointer Declarations:
+	void* process_space = NULL;
+	struct User_Context* UserContext = NULL;
+
+	/* determine size of argument block */
+	unsigned numArgs;
+	ulong_t argBlockSize;
+	Get_Argument_Block_Size(command,  &numArgs,  &argBlockSize);
+  
+	/* calculate size of process space */
+	ulong_t process_space_size = (Round_Up_To_Page(exeFormat->segmentList[1].startAddress
+							+exeFormat->segmentList[1].sizeInMemory)
+							+Round_Up_To_Page(argBlockSize)
+							+(ulong_t)DEFAULT_USER_STACK_SIZE+ PAGE_SIZE);
+  
+	/* malloc memory for process */
+	process_space = Malloc(process_space_size);
+  
+	if(process_space == NULL) /* out of memory error */
+	{
+		rc = ENOMEM;
+		goto ERRCATCH;
+	}
+
+	memset(process_space, '\0', process_space_size); 
+
+	//process_space_usable is the physical address of where the page starts
+	void* process_space_usable = (void*)Round_Up_To_Page((ulong_t)process_space);
+
+	//data_space_usable is the logical address of where the data space starts
+	void* data_space_usable = (void*)(ulong_t)exeFormat->segmentList[1].startAddress;
+      
+	//argument space usable is where the logical address for the arguments start
+	void* arg_space_usable = (void*)((ulong_t)Round_Up_To_Page((ulong_t)data_space_usable +
+					       (ulong_t)exeFormat->segmentList[1].sizeInMemory));
+	//argument space usable is where the stack starts
+	void* stack_space_usable = (void*)((ulong_t)arg_space_usable +(ulong_t)Round_Up_To_Page((ulong_t)argBlockSize));
+
+	void* total_space_usable = stack_space_usable + DEFAULT_USER_STACK_SIZE;
+  
+
+	/* ------------------------------- GDT & LDT -------------------------------------- */ 
+  
+	/* create UserContext structure */
+	UserContext = (struct User_Context *) Malloc(sizeof (struct User_Context));
+
+	if(UserContext == NULL) /* out of memory error */
+	{
+		rc = ENOMEM;
+		goto ERRCATCH;
+	}
+
+	/* clear memory by writing zeros */
+	memset(UserContext, '\0', sizeof(struct User_Context));
+
+	/* create LDT descriptor segment */
+	UserContext->ldtDescriptor = Allocate_Segment_Descriptor();
+
+	/* init LDT descriptor */
+	Init_LDT_Descriptor( UserContext->ldtDescriptor, UserContext->ldt, NUM_USER_LDT_ENTRIES);
+  
+	/* get GDT segment index */
+	int GDT_index;
+	GDT_index = Get_Descriptor_Index(UserContext->ldtDescriptor);
+
+	/* GDT segment index outside range 1 - 15 */
+	KASSERT(!(GDT_index < 1 || GDT_index > 15)); 
+      
+	/* ldt Segment Selector */ 
+	UserContext->ldtSelector = Selector(KERNEL_PRIVILEGE, true, GDT_index);
+  
+	/* create text segment descriptor*/
+	Init_Code_Segment_Descriptor(&(UserContext->ldt[0]), 
+			       (ulong_t)process_space_usable,
+			       (ulong_t)total_space_usable >> PAGE_POWER,
+			       USER_PRIVILEGE);
+
+	/* create data segment descriptor */
+	Init_Data_Segment_Descriptor(&(UserContext->ldt[1]), 
+			       (ulong_t)process_space_usable,
+			       (ulong_t)total_space_usable >> PAGE_POWER,
+			       USER_PRIVILEGE);
+
+	/* ldt text segment selector */ 
+	UserContext->csSelector = Selector(USER_PRIVILEGE, false, 0);
+  
+	/* ldt data segment selector */ 
+	UserContext->dsSelector = Selector(USER_PRIVILEGE, false, 1);
+
+	/* set remaining UserContext parameters */
+//	UserContext->memoryMal = (char *)process_space;
+	UserContext->memory = (char *)process_space_usable;
+	UserContext->size = (ulong_t)total_space_usable;
+	UserContext->entryAddr = exeFormat->entryAddr;
+	UserContext->argBlockAddr = (ulong_t)arg_space_usable;
+	UserContext->stackPointerAddr = UserContext->size - 4;
+	UserContext->refCount = 0;
+  
+	/* format argument block in user space */
+	Format_Argument_Block((char *)((ulong_t)UserContext->memory 
+		+ (ulong_t)UserContext->argBlockAddr),  numArgs, UserContext->argBlockAddr, command);
+
+	/* copy segments to user space */
+	memcpy(UserContext->memory + exeFormat->segmentList[0].startAddress, 
+		exeFileData + exeFormat->segmentList[0].offsetInFile, exeFormat->segmentList[0].lengthInFile);
+ 
+	memcpy(UserContext->memory + exeFormat->segmentList[1].startAddress, 
+		exeFileData + exeFormat->segmentList[1].offsetInFile, exeFormat->segmentList[1].lengthInFile);
+
+	/* return pointer to UserContext */
+	*pUserContext = UserContext;
+	return rc;
+
+	ERRCATCH:
+	if(process_space != NULL)
+		Free(process_space);
+	if(UserContext != NULL)
+		Free(UserContext);
+	return rc;
+}
+
+/*
+ * Copy data from user memory into a kernel buffer.
+ * Params:
+ * destInKernel - address of kernel buffer
+ * srcInUser - address of user buffer
+ * bufSize - number of bytes to copy
+ *
+ * Returns:
+ *   true if successful, false if user buffer is invalid (i.e.,
+ *   doesn't correspond to memory the process has a right to
+ *   access)
+ */
+bool Copy_From_User(void* destInKernel, ulong_t srcInUser, ulong_t bufSize)
+{
+    /*
+     * Hints:
+     * - the User_Context of the current process can be found
+     *   from g_currentThread->userContext
+     * - the user address is an index relative to the chunk
+     *   of memory you allocated for it
+     * - make sure the user buffer lies entirely in memory belonging
+     *   to the process
+     */
+//    TODO("Copy memory from user buffer to kernel buffer");
+    Validate_User_Memory(NULL,0,0); /* delete this; keeps gcc happy */
+
+	struct Kernel_Thread *pThread = Get_Current();
+	void *memory = pThread->userContext->memory;
+	ulong_t size = pThread->userContext->size;
+
+	if(srcInUser < 0 || srcInUser > size || bufSize < 0 || srcInUser + bufSize > size )
+		return false;
+
+	memcpy ((void*)destInKernel, (void*)(srcInUser+(ulong_t)memory), bufSize);
+
+	return true;	
+}
+
+/*
+ * Copy data from kernel memory into a user buffer.
+ * Params:
+ * destInUser - address of user buffer
+ * srcInKernel - address of kernel buffer
+ * bufSize - number of bytes to copy
+ *
+ * Returns:
+ *   true if successful, false if user buffer is invalid (i.e.,
+ *   doesn't correspond to memory the process has a right to
+ *   access)
+ */
+bool Copy_To_User(ulong_t destInUser, void* srcInKernel, ulong_t bufSize)
+{
+    /*
+     * Hints: same as for Copy_From_User()
+     */
+//    TODO("Copy memory from kernel buffer to user buffer");
+	
+	struct Kernel_Thread *pThread = Get_Current();
+	void *memory = pThread->userContext->memory;
+	ulong_t size = pThread->userContext->size;
+
+	if ( destInUser < 0 || destInUser > size || bufSize < 0 || destInUser+bufSize > size )
+		return false;
+
+	memcpy( (void*)((ulong_t)destInUser+(ulong_t)memory), srcInKernel, bufSize );
+
+	return true;
+}
+
+/*
+ * Switch to user address space belonging to given
+ * User_Context object.
+ * Params:
+ * userContext - the User_Context
+ */
+void Switch_To_Address_Space(struct User_Context *userContext)
+{
+    /*
+     * Hint: you will need to use the lldt assembly language instruction
+     * to load the process's LDT by specifying its LDT selector.
+     */
+//    TODO("Switch to user address space using segmentation/LDT");
+	Load_LDTR ( userContext->ldtSelector );
+}
