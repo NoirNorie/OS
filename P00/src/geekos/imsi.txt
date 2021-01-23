@@ -1,0 +1,29 @@
+				case 0x4063 : 								// CTRL + C
+					if( flag == 0x0001 || flag == 0x0010 ) {
+						for(i=0; i<=25; i++) {
+							for(j=0; j<=79; j++) {
+								copy[i][j] = NULL;
+							}
+						}
+						for(i=0; i<=25; i++) {
+							for(j=0; j<=79; j++) {	
+								attr = Get_Current_Attr();
+								if( attr == 12 ) {
+									Get_Cursor(&irow, &icol);
+									copy[i][j] = buffer[i][j];
+									cnt++;
+								}
+							}
+						}					
+						Put_Cursor(irow, icol);
+					}	
+					break;
+				case 0x4076 : 									// CTRL + V
+					for(i=col; i<=cnt; i++) {
+						if( copy[row][i] != NULL ) {
+							Set_Current_Attr(ATTRIB(BLACK, GRAY));								
+							Print("%c", copy[row][i]); 
+						}
+					}
+				break;
+

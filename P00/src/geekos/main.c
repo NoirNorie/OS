@@ -1,0 +1,335 @@
+/*
+ * GeekOS C code entry point
+ * Copyright (c) 2001,2003,2004 David H. Hovemeyer <daveho@cs.umd.edu>
+ * Copyright (c) 2003, Jeffrey K. Hollingsworth <hollings@cs.umd.edu>
+ * Copyright (c) 2004, Iulian Neamtiu <neamtiu@cs.umd.edu>
+ * $Revision: 1.51 $
+ * 
+ * This is free software.  You are permitted to use,
+ * redistribute, and modify it as specified in the file "COPYING".
+ */
+
+#include <geekos/bootinfo.h>
+#include <geekos/string.h>
+#include <geekos/screen.h>
+#include <geekos/mem.h>
+#include <geekos/crc32.h>
+#include <geekos/tss.h>
+#include <geekos/int.h>
+#include <geekos/kthread.h>
+#include <geekos/trap.h>
+#include <geekos/timer.h>
+#include <geekos/keyboard.h>
+
+bool capslock_state=false;
+bool insert_state=true;
+bool shift_state=false;
+
+#define MAX_ROW 25
+#define MAX_COL 80
+
+//char line[MAX_ROW][MAX_COL]={0,};
+int scr_row=0, scr_col=0; // cusor position
+
+void myThread(void);
+void KeypadCtrl(Keycode key, int row, int col);
+void PrintCtrl(Keycode key);
+
+/*
+ * Kernel C code entry point.
+ * Initializes kernel subsystems, mounts filesystems,
+ * and spawns init process.
+ */
+void Main(struct Boot_Info* bootInfo)
+{
+    Init_BSS();
+    Init_Screen();
+    Init_Mem(bootInfo);
+    Init_CRC32();
+    Init_TSS();
+    Init_Interrupts();
+    Init_Scheduler(); 
+    Init_Traps();
+    Init_Timer();
+    Init_Keyboard();
+
+    Set_Current_Attr(ATTRIB(BLACK, GREEN|BRIGHT));
+    Print("Welcome to GeekOS!\n");
+    Set_Current_Attr(ATTRIB(BLACK, GRAY));
+
+    //TODO("Start a kernel thread to echo pressed keys and print counts");
+    
+	Start_Kernel_Thread(&myThread, 0, PRIORITY_NORMAL, true); // strat thread
+
+    /* Now this thread is done. */
+    Exit(0);
+}
+
+void myThread()
+{
+	Keycode key; // input of keyboard
+	int line[24], i, j;  // line's colum, count variable i,j,cnt
+	int flag = 0x00; // shift + home,end flag
+	//int scr_row=0, scr_col=0; // cusor position
+	char buffer[79][24];	// character's array
+
+//	char copy[79][24];	// character's copy array for ctrl+c, v 
+//	int temp_col; //123
+//	int attr; // character's attribute
+
+	for(i=0; i<=24; i++) {	
+		for(j=0; j<=79; j++) {
+			buffer[i][j] = NULL;
+		}
+	}
+
+	Set_Current_Attr(ATTRIB(BLACK, BLUE|BRIGHT));
+	Print("\n	Samsung Software Membership the 21th applicant 'Jang Jun Ho' \n");
+//	Print("[OS 14] 2004122290  Chae Kwon Ki\n"); // print information
+//	Print("[OS 14] 2008712030  Jang Jun Ho\n"); // print information
+//	Print("[OS 14] 2008712037  Jin Hyun Jun\n"); // print information
+	Set_Current_Attr(ATTRIB(BLACK, GRAY));
+	
+	do {
+		key = Wait_For_Key();
+		if( !(key & KEY_RELEASE_FLAG) ) {
+		Get_Cursor(&scr_row, &scr_col); // get current cusor position
+			
+			switch(key) {
+				// enter
+				case 0x0d:
+					line[scr_row] = scr_col;
+					if(scr_row == 24) //  defined NUMROWS : 25
+					{
+						Clear_Screen(); // delete screen
+						Put_Cursor(0, 0); // put cursor at left top
+					}
+					else // not end of screen's row
+					{
+						Print("\n");
+					}
+					break;
+				
+				// backspace
+				case 0x08:
+					if( !(scr_row==0 && scr_col==0) ) 	// if position is not (0,0)  
+					{
+						if( scr_col!= 0 ) 			// column's count is not 0 => not empty line
+						{
+							Put_Cursor(scr_row, scr_col-1);
+							Print(" ");	
+							Put_Cursor(scr_row, scr_col-1);
+						}
+						else 						// column's count is 0  =>  empty line
+						{
+							if( line[scr_row-1] != 79) 	// previous line's column check
+							{
+								Put_Cursor(scr_row-1,line[scr_row-1]);
+								Print(" ");
+								Put_Cursor(scr_row-1, line[scr_row-1]);		
+							} 
+							else 	// line's column => 79 
+							{
+								Put_Cursor(scr_row-1, 79);	
+								Print(" ");
+								Put_Cursor(scr_row-1, 79);
+							}
+						}
+					}
+					break;
+					
+				// Caps Lock 
+				case KEY_CAPSLOCK:
+					capslock_state = !capslock_state; // transfer state
+					break;
+					
+				// Insert
+				case KEY_KPINSERT:
+					insert_state = !insert_state; // transfer state
+					break;
+				
+				// Delete
+				case KEY_KPDEL:
+					Print("DELETE\n");
+					break;
+				
+				// Shift
+				case KEY_LSHIFT:
+				case KEY_RSHIFT:
+					shift_state = !shift_state;
+					Print("SHIFT\n");
+					break;
+				// Keypad
+				case KEY_KPUP:
+				case KEY_KPDOWN:
+				case KEY_KPLEFT:
+				case KEY_KPRIGHT:
+					KeypadCtrl(key, scr_row, scr_col);
+					break;
+				case KEY_KPCENTER:
+					//Print("%s", line[scr_row]);
+					break;
+				
+				case KEY_KPHOME :
+					Put_Cursor(scr_row, 0);		
+					break;
+
+				case KEY_KPEND :
+					for( i=79; i>=0; i-- ) // finding last column 
+					{
+						if( buffer[scr_row][i] != NULL ) 
+							break;
+					}				
+					Put_Cursor(scr_row, scr_col);
+					for( ; scr_col<=i; scr_col++ ) // when move from left position to right position
+					{
+						Print("%c", buffer[scr_row][scr_col]); 						
+					}
+					break;
+
+				case 0X1380 : // SHIFT + HOME					
+					flag |= 0x01;				// 0x01 - Home key ... one input
+					if( flag == 0x01 ) 
+					{	
+						Put_Cursor(scr_row, 0);	
+						Set_Current_Attr( ATTRIB(BLACK, RED | BRIGHT) );
+						for(i=0; i<=scr_col; i++) // column 0 ~ current column
+						{			
+							Print("%c", buffer[scr_row][i]);
+						}	
+						Put_Cursor(scr_row, 0);
+					}
+					else if ( flag == 0x11 ) 			// 0x11 - HOME KEY + END KEY ... each one input
+					{
+						Put_Cursor(scr_row,0);		// when move from left block to right block, block free
+						for( i=0; i<=scr_col; i++ ) 
+						{
+							Set_Current_Attr(ATTRIB(BLACK, GRAY));						
+							Print("%c", buffer[scr_row][i]);
+						}	
+						Put_Cursor(scr_row, 0);
+						flag = 0x00;			// Home key init
+					}	
+			 		break;			
+	
+				case 0x1388 :	// SHIFT + END
+					flag |= 0x10;			// 0x10 - End Key ... one input
+					if( flag == 0x10 ) 
+					{
+						Set_Current_Attr( ATTRIB(BLACK, RED | BRIGHT) );
+						for( i=79; i>=0; i-- ) 	// finding last column 
+						{					
+							if( buffer[scr_row][i] != NULL ) 
+								break;
+						}
+						Put_Cursor(scr_row, scr_col);
+						for( ; scr_col<=i; scr_col++ ) // when cursor position is in front of characters
+						{
+							Print("%c", buffer[scr_row][scr_col]); 						
+						}
+					} 
+					else if( flag == 0x11 ) // 0x11 - HOME KEY + END KEY ... each one input
+					{
+						for( i=79; i>=0; i-- ) // when move from left block to right block, block free
+						{
+							if( buffer[scr_row][i] != NULL ) 
+								break;
+						}
+						for( ; scr_col<=i; scr_col++ ) // when cursor position is in front of characters
+						{
+							Set_Current_Attr(ATTRIB(BLACK, GRAY));			
+							Print("%c", buffer[scr_row][scr_col]);
+						}
+						flag = 0x00;		// End Key init
+					}				
+					break;
+/*
+				case 0x4063 : 								// CTRL + C
+					if( flag == 0x01 || flag == 0x10 ) 
+					{
+						for(i=0; i<=24; i++) 			// copy array init
+						{
+							for(j=0; j<=79; j++) 
+							{
+								copy[i][j] = NULL;
+							}
+						}
+						for(i=0; i<=24; i++) 
+						{
+							for(j=0; j<=79; j++) 
+							{	
+								Put_Cursor(i,j);
+								attr = Get_Current_Attr();		// for checking character's attribute check
+								if( attr == 12 ) 				// if character's attribute  =>  red .... block on 
+									copy[i][j] = buffer[i][j];	
+							}
+						}					
+						Put_Cursor(scr_row-cnt, scr_col-cnt);
+					}	
+					break;
+
+				case 0x4076 : 									// CTRL + V
+					for( i=0; i<=24; i++ )  
+					{
+						for( j=0; j<=79; j++ ) 
+						{
+							if( copy[i][j] != NULL ) 				// array's value check
+							{
+								Set_Current_Attr(ATTRIB(BLACK, GRAY));								
+								Print("%c", copy[i][j]); 
+							}
+						}
+					}
+				break;
+*/
+				default:
+					Set_Current_Attr(ATTRIB(BLACK, GRAY));			
+					PrintCtrl(key);
+					buffer[scr_row][scr_col] = key;
+					line[scr_row] = scr_col;
+					break;
+			}
+		}
+	} while(key!=0x4064 && key!=0x4044);
+	
+	Print("\nBye!\n");
+	Exit(0);		// thread exit
+	return 0;
+}
+
+void KeypadCtrl(Keycode key, int row, int col)
+{
+		switch(key)
+		{
+				case KEY_KPUP:			// up
+					Put_Cursor(--row, col);
+					break;
+				case KEY_KPDOWN:			// down
+					Put_Cursor(++row, col);
+					break;
+				case KEY_KPLEFT:			// left
+					Put_Cursor(row, --col);
+					break;
+				case KEY_KPRIGHT:			// right
+					Put_Cursor(row, ++col);
+					break;
+		}
+}
+
+void PrintCtrl(Keycode key)	// caps lock
+{
+	Get_Cursor(&scr_row, &scr_col);
+			
+		if(!capslock_state)
+		{
+			Print("%c", key);
+		}
+		else
+		{
+			if(key>='a' && key<='z')
+			{			
+				Print("%c", key-32);
+			}
+		}
+}
+
